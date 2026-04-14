@@ -21,6 +21,8 @@ type NetworkNode struct {
 	Port    int
 }
 
+var ErrNotFound = errors.New("not found")
+
 func NewNetworkNode(Address string, Port string) *NetworkNode {
 	p, _ := strconv.Atoi(Port)
 	return &NetworkNode{
