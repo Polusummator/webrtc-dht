@@ -9,16 +9,16 @@ const (
 
 type RPCHandler interface {
 	OnPing(sender *NetworkNode) error
-	OnStore(sender *NetworkNode, key DHTKey, data []byte) error
+	OnStore(sender *NetworkNode, key DHTKey, data ValueMeta) error
 	OnFindNode(sender *NetworkNode, targetID NodeId) ([]*NetworkNode, error)
-	OnFindValue(sender *NetworkNode, key DHTKey) ([]byte, []*NetworkNode, error)
+	OnFindValue(sender *NetworkNode, key DHTKey) (*ValueMeta, []*NetworkNode, error)
 }
 
 type Transport interface {
 	Ping(target *NetworkNode) error
-	Store(target *NetworkNode, key DHTKey, data []byte) error
+	Store(target *NetworkNode, key DHTKey, data ValueMeta) error
 	FindNode(target *NetworkNode, targetId NodeId) ([]*NetworkNode, error)
-	FindValue(target *NetworkNode, key DHTKey) ([]byte, []*NetworkNode, error)
+	FindValue(target *NetworkNode, key DHTKey) (*ValueMeta, []*NetworkNode, error)
 	Listen(handler RPCHandler) error
 	Close() error
 }

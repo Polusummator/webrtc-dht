@@ -21,8 +21,6 @@ type NetworkNode struct {
 	Port    int
 }
 
-var ErrNotFound = errors.New("not found")
-
 func NewNetworkNode(Address string, Port string) *NetworkNode {
 	p, _ := strconv.Atoi(Port)
 	return &NetworkNode{
@@ -61,7 +59,7 @@ func (node *Node) OnPing(sender *NetworkNode) error {
 	return nil
 }
 
-func (node *Node) OnStore(sender *NetworkNode, key DHTKey, data []byte) error {
+func (node *Node) OnStore(sender *NetworkNode, key DHTKey, data ValueMeta) error {
 	node.observePeer(sender)
 	node.storage.Put(key, data)
 	return nil
@@ -72,7 +70,7 @@ func (node *Node) OnFindNode(sender *NetworkNode, targetID NodeId) ([]*NetworkNo
 	return node.rt.FindClosest(targetID, K), nil
 }
 
-func (node *Node) OnFindValue(sender *NetworkNode, key DHTKey) ([]byte, []*NetworkNode, error) {
+func (node *Node) OnFindValue(sender *NetworkNode, key DHTKey) (*ValueMeta, []*NetworkNode, error) {
 	node.observePeer(sender)
 	if value := node.storage.Get(key); value != nil {
 		return value, nil, nil
