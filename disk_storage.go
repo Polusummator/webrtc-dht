@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/hex"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"sync"
@@ -24,7 +25,7 @@ func (s *DiskStorage) keyToPath(key DHTKey) string {
 	return filepath.Join(s.baseDir, encoded)
 }
 
-func (s *DiskStorage) Get(key DHTKey) []byte {
+func (s *DiskStorage) Get(key DHTKey) *ValueMeta {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -33,15 +34,24 @@ func (s *DiskStorage) Get(key DHTKey) []byte {
 	if err != nil {
 		return nil
 	}
-	return data
+
+	var meta ValueMeta
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return nil
+	}
+	return &meta
 }
 
-func (s *DiskStorage) Put(key DHTKey, value []byte) {
+func (s *DiskStorage) Put(key DHTKey, value ValueMeta) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	path := s.keyToPath(key)
-	_ = os.WriteFile(path, value, 0644)
+	data, err := json.Marshal(value)
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(path, data, 0644)
 }
 
 func (s *DiskStorage) Delete(key DHTKey) {

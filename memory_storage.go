@@ -2,18 +2,12 @@ package main
 
 import "sync"
 
-type Storage interface {
-	Get(key DHTKey) []byte
-	Put(key DHTKey, value []byte)
-	Delete(key DHTKey)
-}
-
 type MemoryStorage struct {
 	mu   sync.RWMutex
-	data map[string][]byte
+	data map[string]*ValueMeta
 }
 
-func (s *MemoryStorage) Get(key DHTKey) []byte {
+func (s *MemoryStorage) Get(key DHTKey) *ValueMeta {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -22,18 +16,24 @@ func (s *MemoryStorage) Get(key DHTKey) []byte {
 		return nil
 	}
 
-	copyValue := make([]byte, len(v))
-	copy(copyValue, v)
-	return copyValue
+	copyValue := *v
+	if v.Data != nil {
+		copyValue.Data = make([]byte, len(v.Data))
+		copy(copyValue.Data, v.Data)
+	}
+	return &copyValue
 }
 
-func (s *MemoryStorage) Put(key DHTKey, value []byte) {
+func (s *MemoryStorage) Put(key DHTKey, value ValueMeta) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	copyValue := make([]byte, len(value))
-	copy(copyValue, value)
-	s.data[string(key)] = copyValue
+	copyValue := value
+	if value.Data != nil {
+		copyValue.Data = make([]byte, len(value.Data))
+		copy(copyValue.Data, value.Data)
+	}
+	s.data[string(key)] = &copyValue
 }
 
 func (s *MemoryStorage) Delete(key DHTKey) {
@@ -44,6 +44,6 @@ func (s *MemoryStorage) Delete(key DHTKey) {
 
 func NewMemoryStorage() *MemoryStorage {
 	return &MemoryStorage{
-		data: make(map[string][]byte),
+		data: make(map[string]*ValueMeta),
 	}
 }
