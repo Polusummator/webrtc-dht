@@ -8,6 +8,8 @@ import (
 	"net"
 	"sync"
 	"time"
+
+	"github.com/pion/stun/v3"
 )
 
 const defaultRequestTimeout = 2 * time.Second
@@ -36,13 +38,19 @@ type UDPTransport struct {
 
 	requestTimeout  time.Duration
 	pendingRequests sync.Map // map[string]*pendingReq
+	stunServer      string
 }
 
 func NewUDPTransport(local *NetworkNode) *UDPTransport {
 	return &UDPTransport{
 		localNode:      local,
 		requestTimeout: defaultRequestTimeout,
+		stunServer:     "stun.l.google.com:19302", // todo
 	}
+}
+
+func (t *UDPTransport) SetStunServer(server string) {
+	t.stunServer = server
 }
 
 func (t *UDPTransport) Listen(handler RPCHandler) error {
@@ -61,6 +69,12 @@ func (t *UDPTransport) Listen(handler RPCHandler) error {
 	}
 	t.conn = conn
 
+	if t.stunServer != "" {
+		if err := t.resolvePublicAddress(); err != nil {
+			fmt.Printf("STUN warning: %v\n", err)
+		}
+	}
+
 	go func() {
 		buf := make([]byte, 65535)
 		for {
@@ -73,11 +87,55 @@ func (t *UDPTransport) Listen(handler RPCHandler) error {
 			}
 
 			var msg message
+			if stun.IsMessage(buf[:n]) {
+				continue
+			}
+
 			if err := json.Unmarshal(buf[:n], &msg); err == nil {
 				go t.handleMessage(&msg, remoteAddr)
 			}
 		}
 	}()
+	return nil
+}
+
+func (t *UDPTransport) resolvePublicAddress() error {
+	serverAddr, err := net.ResolveUDPAddr("udp", t.stunServer)
+	if err != nil {
+		return err
+	}
+
+	_ = t.conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	defer t.conn.SetReadDeadline(time.Time{})
+
+	b, err := stun.Build(stun.TransactionID, stun.BindingRequest)
+	if err != nil {
+		return err
+	}
+
+	if _, err := t.conn.WriteToUDP(b.Raw, serverAddr); err != nil {
+		return err
+	}
+
+	buf := make([]byte, 1024)
+	n, _, err := t.conn.ReadFromUDP(buf)
+	if err != nil {
+		return err
+	}
+
+	msg := new(stun.Message)
+	msg.Raw = buf[:n]
+	if err := msg.Decode(); err != nil {
+		return err
+	}
+
+	var xorAddr stun.XORMappedAddress
+	if err := xorAddr.GetFrom(msg); err != nil {
+		return err
+	}
+
+	t.localNode.Address = xorAddr.IP
+	t.localNode.Port = xorAddr.Port
 	return nil
 }
 
