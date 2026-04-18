@@ -2,31 +2,29 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"net"
-	"strconv"
 )
 
-type NodeId DHTKey
-
 type Node struct {
-	node      *NetworkNode
+	self      *NetworkNode
 	storage   Storage
 	transport Transport
 	rt        *RoutingTable
 }
 
 type NetworkNode struct {
-	Id      NodeId
-	Address net.IP
-	Port    int
+	Id      NodeId            `json:"id"`
+	Address net.IP            `json:"address"`
+	Port    int               `json:"port"`
+	Meta    map[string]string `json:"meta,omitempty"` // todo: sdp?
 }
 
-func NewNetworkNode(Address string, Port string) *NetworkNode {
-	p, _ := strconv.Atoi(Port)
+func NewNetworkNode(address string, port int) *NetworkNode {
 	return &NetworkNode{
-		Id:      NodeId(generateKey()),
-		Address: net.ParseIP(Address),
-		Port:    p,
+		Id:      generateKey(),
+		Address: net.ParseIP(address),
+		Port:    port,
 	}
 }
 
@@ -38,9 +36,8 @@ func NewNodeWithStorage(netNode *NetworkNode, transport Transport, storage Stora
 	if storage == nil {
 		storage = NewMemoryStorage()
 	}
-
 	return &Node{
-		node:      netNode,
+		self:      netNode,
 		storage:   storage,
 		transport: transport,
 		rt:        NewRoutingTable(netNode.Id),
@@ -48,10 +45,9 @@ func NewNodeWithStorage(netNode *NetworkNode, transport Transport, storage Stora
 }
 
 func (node *Node) observePeer(peer *NetworkNode) {
-	if peer == nil {
-		return
+	if peer != nil {
+		node.rt.Add(peer)
 	}
-	node.rt.Add(peer)
 }
 
 func (node *Node) OnPing(sender *NetworkNode) error {
@@ -75,13 +71,19 @@ func (node *Node) OnFindValue(sender *NetworkNode, key DHTKey) (*ValueMeta, []*N
 	if value := node.storage.Get(key); value != nil {
 		return value, nil, nil
 	}
-
-	nodes := node.rt.FindClosest(NodeId(key), K)
+	nodes := node.rt.FindClosest(key, K)
 	if len(nodes) == 0 {
 		return nil, nil, ErrNotFound
 	}
-
 	return nil, nodes, nil
+}
+
+func (node *Node) OnFetchBlob(_ *NetworkNode, ref string) ([]byte, error) {
+	bs, ok := node.storage.(BlobStore)
+	if !ok {
+		return nil, errors.New("node does not support blob storage")
+	}
+	return bs.GetBlob(ref)
 }
 
 func (node *Node) Start() error {
@@ -89,4 +91,20 @@ func (node *Node) Start() error {
 		return errors.New("transport is not configured")
 	}
 	return node.transport.Listen(node)
+}
+
+func (node *Node) Close() error {
+	if node.transport == nil {
+		return nil
+	}
+	return node.transport.Close()
+}
+
+func (node *Node) blobStore() (BlobStore, bool) {
+	bs, ok := node.storage.(BlobStore)
+	return bs, ok
+}
+
+func (node *Node) nodeAddr() string {
+	return fmt.Sprintf("%s:%d", node.self.Address, node.self.Port)
 }

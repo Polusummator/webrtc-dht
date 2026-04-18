@@ -2,9 +2,11 @@ package main
 
 import (
 	"crypto/rand"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"sync"
 	"time"
@@ -13,6 +15,7 @@ import (
 )
 
 const defaultRequestTimeout = 2 * time.Second
+const blobTCPTimeout = 30 * time.Second
 
 type message struct {
 	Type     string         `json:"type"`
@@ -34,6 +37,7 @@ type pendingReq struct {
 type UDPTransport struct {
 	localNode *NetworkNode
 	conn      *net.UDPConn
+	tcpLn     net.Listener // for blob fetching
 	handler   RPCHandler
 
 	requestTimeout  time.Duration
@@ -62,12 +66,20 @@ func (t *UDPTransport) Listen(handler RPCHandler) error {
 	}
 	t.handler = handler
 
-	addr := &net.UDPAddr{IP: t.localNode.Address, Port: t.localNode.Port}
-	conn, err := net.ListenUDP("udp", addr)
+	udpAddr := &net.UDPAddr{IP: t.localNode.Address, Port: t.localNode.Port}
+	conn, err := net.ListenUDP("udp", udpAddr)
 	if err != nil {
 		return err
 	}
 	t.conn = conn
+
+	tcpAddr := &net.TCPAddr{IP: t.localNode.Address, Port: t.localNode.Port}
+	tcpLn, err := net.ListenTCP("tcp", tcpAddr)
+	if err != nil {
+		_ = conn.Close()
+		return fmt.Errorf("blob tcp listener: %w", err)
+	}
+	t.tcpLn = tcpLn
 
 	if t.stunServer != "" {
 		if err := t.resolvePublicAddress(); err != nil {
@@ -75,28 +87,69 @@ func (t *UDPTransport) Listen(handler RPCHandler) error {
 		}
 	}
 
-	go func() {
-		buf := make([]byte, 65535)
-		for {
-			n, remoteAddr, err := t.conn.ReadFromUDP(buf)
-			if err != nil {
-				if errors.Is(err, net.ErrClosed) {
-					return
-				}
-				continue
-			}
-
-			var msg message
-			if stun.IsMessage(buf[:n]) {
-				continue
-			}
-
-			if err := json.Unmarshal(buf[:n], &msg); err == nil {
-				go t.handleMessage(&msg, remoteAddr)
-			}
-		}
-	}()
+	go t.listenUDP()
+	go t.listenBlobTCP()
 	return nil
+}
+
+func (t *UDPTransport) listenUDP() {
+	buf := make([]byte, 65535)
+	for {
+		n, remoteAddr, err := t.conn.ReadFromUDP(buf)
+		if err != nil {
+			if errors.Is(err, net.ErrClosed) {
+				return
+			}
+			continue
+		}
+		if stun.IsMessage(buf[:n]) {
+			continue
+		}
+		var msg message
+		if err := json.Unmarshal(buf[:n], &msg); err == nil {
+			go t.handleMessage(&msg, remoteAddr)
+		}
+	}
+}
+
+func (t *UDPTransport) listenBlobTCP() {
+	for {
+		conn, err := t.tcpLn.Accept()
+		if err != nil {
+			if errors.Is(err, net.ErrClosed) {
+				return
+			}
+			continue
+		}
+		go t.handleBlobConn(conn)
+	}
+}
+
+func (t *UDPTransport) handleBlobConn(conn net.Conn) {
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(blobTCPTimeout))
+
+	refBuf := make([]byte, 64)
+	if _, err := io.ReadFull(conn, refBuf); err != nil {
+		return
+	}
+	ref := string(refBuf)
+
+	var data []byte
+	if t.handler != nil {
+		var err error
+		data, err = t.handler.OnFetchBlob(nil, ref)
+		if err != nil {
+			data = nil
+		}
+	}
+
+	sizeBuf := make([]byte, 8)
+	binary.BigEndian.PutUint64(sizeBuf, uint64(len(data)))
+	_, _ = conn.Write(sizeBuf)
+	if len(data) > 0 {
+		_, _ = conn.Write(data)
+	}
 }
 
 func (t *UDPTransport) resolvePublicAddress() error {
@@ -106,7 +159,7 @@ func (t *UDPTransport) resolvePublicAddress() error {
 	}
 
 	_ = t.conn.SetReadDeadline(time.Now().Add(3 * time.Second))
-	defer t.conn.SetReadDeadline(time.Time{})
+	defer func() { _ = t.conn.SetReadDeadline(time.Time{}) }()
 
 	b, err := stun.Build(stun.TransactionID, stun.BindingRequest)
 	if err != nil {
@@ -281,7 +334,43 @@ func (t *UDPTransport) FindValue(target *NetworkNode, key DHTKey) (*ValueMeta, [
 	return resp.Value, resp.Nodes, nil
 }
 
+func (t *UDPTransport) FetchBlob(target *NetworkNode, ref string) ([]byte, error) {
+	if len(ref) != 64 {
+		return nil, fmt.Errorf("invalid blob ref length: %d", len(ref))
+	}
+
+	addr := fmt.Sprintf("%s:%d", target.Address, target.Port)
+	conn, err := net.DialTimeout("tcp", addr, blobTCPTimeout)
+	if err != nil {
+		return nil, fmt.Errorf("blob tcp dial %s: %w", addr, err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(blobTCPTimeout))
+
+	if _, err := io.WriteString(conn, ref); err != nil {
+		return nil, err
+	}
+
+	sizeBuf := make([]byte, 8)
+	if _, err := io.ReadFull(conn, sizeBuf); err != nil {
+		return nil, err
+	}
+	size := binary.BigEndian.Uint64(sizeBuf)
+	if size == 0 {
+		return nil, ErrNotFound
+	}
+
+	data := make([]byte, size)
+	if _, err := io.ReadFull(conn, data); err != nil {
+		return nil, fmt.Errorf("blob read: %w", err)
+	}
+	return data, nil
+}
+
 func (t *UDPTransport) Close() error {
+	if t.tcpLn != nil {
+		_ = t.tcpLn.Close()
+	}
 	if t.conn != nil {
 		return t.conn.Close()
 	}

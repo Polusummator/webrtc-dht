@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sort"
 	"sync"
 )
@@ -10,20 +11,23 @@ import (
 const Alpha = 3
 
 func (node *Node) Bootstrap(ctx context.Context, bootstrapNodes []*NetworkNode) error {
+	if len(bootstrapNodes) == 0 {
+		return errors.New("no bootstrap nodes provided")
+	}
 	for _, n := range bootstrapNodes {
 		node.rt.Add(n)
 	}
-	if len(bootstrapNodes) == 0 {
-		return errors.New("no bootstrap nodes")
-	}
-	_, err := node.LookupNode(ctx, node.node.Id)
+	_, err := node.LookupNode(ctx, node.self.Id)
 	return err
 }
+
 func (node *Node) LookupNode(ctx context.Context, target NodeId) ([]*NetworkNode, error) {
-	return node.iterativeLookup(ctx, target)
+	nodes, _, err := node.iterativeSearch(ctx, target, false)
+	return nodes, err
 }
+
 func (node *Node) StoreValue(ctx context.Context, key DHTKey, data ValueMeta) error {
-	nodes, err := node.LookupNode(ctx, NodeId(key))
+	nodes, err := node.LookupNode(ctx, key)
 	if err != nil && len(nodes) == 0 {
 		return err
 	}
@@ -32,83 +36,143 @@ func (node *Node) StoreValue(ctx context.Context, key DHTKey, data ValueMeta) er
 	}
 	return nil
 }
+
+func (node *Node) StoreBlob(ctx context.Context, key DHTKey, data []byte, mimeType string) error {
+	bs, ok := node.blobStore()
+	if !ok {
+		return errors.New("storage does not implement BlobStore; use DiskStorage")
+	}
+
+	ref, err := bs.PutBlob(data)
+	if err != nil {
+		return fmt.Errorf("store blob locally: %w", err)
+	}
+
+	meta := ValueMeta{
+		Inline:   false,
+		BlobRef:  ref,
+		BlobNode: node.self.Id,
+		Size:     int64(len(data)),
+		MimeType: mimeType,
+	}
+	return node.StoreValue(ctx, key, meta)
+}
+
 func (node *Node) FindValue(ctx context.Context, key DHTKey) (*ValueMeta, error) {
-	val := node.storage.Get(key)
-	if val != nil {
+	if val := node.storage.Get(key); val != nil {
 		return val, nil
 	}
-	_, val, err := node.iterativeSearch(ctx, NodeId(key), true)
+	_, val, err := node.iterativeSearch(ctx, key, true)
 	return val, err
 }
-func (node *Node) iterativeLookup(ctx context.Context, target NodeId) ([]*NetworkNode, error) {
-	nodes, _, err := node.iterativeSearch(ctx, target, false)
-	return nodes, err
+
+func (node *Node) FetchBlob(ctx context.Context, meta *ValueMeta) ([]byte, error) {
+	if meta == nil {
+		return nil, errors.New("meta is nil")
+	}
+	if meta.Inline {
+		return meta.Data, nil
+	}
+	if meta.BlobRef == "" {
+		return nil, errors.New("blob ref is empty")
+	}
+
+	if bs, ok := node.blobStore(); ok {
+		if data, err := bs.GetBlob(meta.BlobRef); err == nil {
+			return data, nil
+		}
+	}
+
+	peers := node.rt.FindClosest(meta.BlobNode, 1)
+	if len(peers) == 0 || peers[0].Id != meta.BlobNode {
+		return nil, fmt.Errorf("blob node %x not found in routing table", meta.BlobNode)
+	}
+
+	return node.transport.FetchBlob(peers[0], meta.BlobRef)
 }
-func (node *Node) iterativeSearch(ctx context.Context, target NodeId, isFindValue bool) ([]*NetworkNode, *ValueMeta, error) {
+
+func (node *Node) iterativeSearch(
+	ctx context.Context,
+	target NodeId,
+	isFindValue bool,
+) ([]*NetworkNode, *ValueMeta, error) {
+
 	closest := node.rt.FindClosest(target, K)
 	if len(closest) == 0 {
-		return nil, nil, errors.New("routing table empty")
+		return nil, nil, errors.New("routing table is empty")
 	}
-	visited := make(map[string]bool)
+
+	visited := make(map[NodeId]bool)
+
 	for {
+		if err := ctx.Err(); err != nil {
+			return closest, nil, err
+		}
+
 		var toQuery []*NetworkNode
 		for _, n := range closest {
-			if !visited[string(n.Id)] {
+			if !visited[n.Id] {
 				toQuery = append(toQuery, n)
+				if len(toQuery) == Alpha {
+					break
+				}
 			}
 		}
 		if len(toQuery) == 0 {
 			break
 		}
-		if len(toQuery) > Alpha {
-			toQuery = toQuery[:Alpha]
-		}
-		var wg sync.WaitGroup
-		var newNodes []*NetworkNode
-		var foundValue *ValueMeta
-		var qMu sync.Mutex
+
+		var (
+			wg         sync.WaitGroup
+			mu         sync.Mutex
+			newNodes   []*NetworkNode
+			foundValue *ValueMeta
+		)
+
 		for _, qNode := range toQuery {
-			visited[string(qNode.Id)] = true
+			visited[qNode.Id] = true
 			wg.Add(1)
 			go func(n *NetworkNode) {
 				defer wg.Done()
-				var val *ValueMeta
-				var res []*NetworkNode
-				var err error
 
+				var (
+					val *ValueMeta
+					res []*NetworkNode
+					err error
+				)
 				if isFindValue {
-					val, res, err = node.transport.FindValue(n, DHTKey(target))
+					val, res, err = node.transport.FindValue(n, target)
 				} else {
 					res, err = node.transport.FindNode(n, target)
 				}
+				if err != nil {
+					return
+				}
 
-				if err == nil {
-					qMu.Lock()
-					defer qMu.Unlock()
-					if val != nil {
-						foundValue = val
-					} else {
-						newNodes = append(newNodes, res...)
-					}
-					for _, r := range res {
-						node.rt.Add(r)
+				mu.Lock()
+				defer mu.Unlock()
+				if val != nil {
+					foundValue = val
+					return
+				}
+				for _, r := range res {
+					node.rt.Add(r)
+					if !visited[r.Id] {
+						newNodes = append(newNodes, r)
 					}
 				}
 			}(qNode)
 		}
 		wg.Wait()
+
 		if foundValue != nil {
 			return nil, foundValue, nil
 		}
-		for _, n := range newNodes {
-			if !visited[string(n.Id)] {
-				closest = append(closest, n)
-			}
-		}
+
+		closest = append(closest, newNodes...)
 		sort.Slice(closest, func(i, j int) bool {
-			d1 := getKeyDistance(DHTKey(closest[i].Id), DHTKey(target))
-			d2 := getKeyDistance(DHTKey(closest[j].Id), DHTKey(target))
-			return d1.Cmp(d2) < 0
+			return getKeyDistance(closest[i].Id, target).
+				Cmp(getKeyDistance(closest[j].Id, target)) < 0
 		})
 		if len(closest) > K {
 			closest = closest[:K]

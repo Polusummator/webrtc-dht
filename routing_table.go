@@ -9,68 +9,68 @@ import (
 const K = 20
 
 type RoutingTable struct {
-	NodeId  NodeId
-	Buckets [160][]*NetworkNode
-	mutex   sync.RWMutex
+	nodeId  NodeId
+	buckets [160][]*NetworkNode
+	mu      sync.RWMutex
 }
 
-func NewRoutingTable(Id NodeId) *RoutingTable {
-	return &RoutingTable{
-		NodeId: Id,
-	}
+func NewRoutingTable(id NodeId) *RoutingTable {
+	return &RoutingTable{nodeId: id}
 }
 
 func (rt *RoutingTable) bucketIndex(target NodeId) int {
-	distance := getKeyDistance(DHTKey(rt.NodeId), DHTKey(target))
-	bitLen := distance.BitLen()
-	if bitLen == 0 {
+	dist := getKeyDistance(rt.nodeId, target)
+	if dist.BitLen() == 0 {
 		return 0
 	}
-	return bitLen - 1
+	return dist.BitLen() - 1
 }
 
 func (rt *RoutingTable) Add(node *NetworkNode) {
-	if string(rt.NodeId) == string(node.Id) {
-		return
+	if rt.nodeId == node.Id {
+		return // не добавляем самого себя
 	}
-	rt.mutex.Lock()
-	defer rt.mutex.Unlock()
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+
 	idx := rt.bucketIndex(node.Id)
-	bucket := rt.Buckets[idx]
+	bucket := rt.buckets[idx]
+
 	for i, n := range bucket {
-		if string(n.Id) == string(node.Id) {
-			rt.Buckets[idx] = append(append(bucket[:i], bucket[i+1:]...), node)
+		if n.Id == node.Id {
+			rt.buckets[idx] = append(append(bucket[:i:i], bucket[i+1:]...), node)
 			return
 		}
 	}
+
 	if len(bucket) < K {
-		rt.Buckets[idx] = append(bucket, node)
-	} else {
-		// todo: ping existing nodes and replace if unresponsive
+		rt.buckets[idx] = append(bucket, node)
 	}
+	// TODO: ping, eviction
 }
 
-type NodeDistance struct {
-	Node     *NetworkNode
-	Distance *big.Int
+type nodeDistance struct {
+	node     *NetworkNode
+	distance *big.Int
 }
 
 func (rt *RoutingTable) FindClosest(target NodeId, count int) []*NetworkNode {
-	rt.mutex.RLock()
-	defer rt.mutex.RUnlock()
-	var allNodes []NodeDistance
-	for _, bucket := range rt.Buckets {
+	rt.mu.RLock()
+	defer rt.mu.RUnlock()
+
+	var all []nodeDistance
+	for _, bucket := range rt.buckets {
 		for _, n := range bucket {
-			dist := getKeyDistance(DHTKey(n.Id), DHTKey(target))
-			allNodes = append(allNodes, NodeDistance{Node: n, Distance: dist})
+			all = append(all, nodeDistance{n, getKeyDistance(n.Id, target)})
 		}
 	}
-	sort.Slice(allNodes, func(i, j int) bool {
-		return allNodes[i].Distance.Cmp(allNodes[j].Distance) < 0
+	sort.Slice(all, func(i, j int) bool {
+		return all[i].distance.Cmp(all[j].distance) < 0
 	})
-	var result []*NetworkNode
-	for i := 0; i < len(allNodes) && i < count; i++ {
-		result = append(result, allNodes[i].Node)
+
+	result := make([]*NetworkNode, 0, min(count, len(all)))
+	for i := 0; i < len(all) && i < count; i++ {
+		result = append(result, all[i].node)
 	}
 	return result
 }
