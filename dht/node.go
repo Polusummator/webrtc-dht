@@ -36,12 +36,16 @@ func NewNodeWithStorage(netNode *NetworkNode, transport Transport, storage Stora
 	if storage == nil {
 		storage = NewMemoryStorage()
 	}
-	return &Node{
+	n := &Node{
 		self:      netNode,
 		storage:   storage,
 		transport: transport,
 		rt:        NewRoutingTable(netNode.Id),
 	}
+	n.rt.SetPing(func(peer *NetworkNode) bool {
+		return n.transport.Ping(peer) == nil
+	})
+	return n
 }
 
 func (node *Node) observePeer(peer *NetworkNode) {

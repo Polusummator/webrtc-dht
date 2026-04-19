@@ -12,10 +12,15 @@ type RoutingTable struct {
 	nodeId  NodeId
 	buckets [160][]*NetworkNode
 	mu      sync.RWMutex
+	ping    func(*NetworkNode) bool
 }
 
 func NewRoutingTable(id NodeId) *RoutingTable {
 	return &RoutingTable{nodeId: id}
+}
+
+func (rt *RoutingTable) SetPing(fn func(*NetworkNode) bool) {
+	rt.ping = fn
 }
 
 func (rt *RoutingTable) bucketIndex(target NodeId) int {
@@ -31,7 +36,6 @@ func (rt *RoutingTable) Add(node *NetworkNode) {
 		return
 	}
 	rt.mu.Lock()
-	defer rt.mu.Unlock()
 
 	idx := rt.bucketIndex(node.Id)
 	bucket := rt.buckets[idx]
@@ -39,14 +43,41 @@ func (rt *RoutingTable) Add(node *NetworkNode) {
 	for i, n := range bucket {
 		if n.Id == node.Id {
 			rt.buckets[idx] = append(append(bucket[:i:i], bucket[i+1:]...), node)
+			rt.mu.Unlock()
 			return
 		}
 	}
 
 	if len(bucket) < K {
 		rt.buckets[idx] = append(bucket, node)
+		rt.mu.Unlock()
+		return
 	}
-	// todo: ping, eviction
+
+	lrs := bucket[0]
+	rt.mu.Unlock()
+
+	if rt.ping != nil && rt.ping(lrs) {
+		rt.mu.Lock()
+		b := rt.buckets[idx]
+		for i, n := range b {
+			if n.Id == lrs.Id {
+				rt.buckets[idx] = append(append(b[:i:i], b[i+1:]...), lrs)
+				break
+			}
+		}
+		rt.mu.Unlock()
+	} else {
+		rt.mu.Lock()
+		b := rt.buckets[idx]
+		for i, n := range b {
+			if n.Id == lrs.Id {
+				rt.buckets[idx] = append(append(b[:i:i], b[i+1:]...), node)
+				break
+			}
+		}
+		rt.mu.Unlock()
+	}
 }
 
 type nodeDistance struct {
