@@ -1,8 +1,6 @@
-package main
+package dht
 
-import (
-	"errors"
-)
+import "errors"
 
 var ErrNotFound = errors.New("not found")
 

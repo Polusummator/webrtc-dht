@@ -1,4 +1,4 @@
-package main
+package dht
 
 import (
 	"context"
@@ -171,8 +171,8 @@ func (node *Node) iterativeSearch(
 
 		closest = append(closest, newNodes...)
 		sort.Slice(closest, func(i, j int) bool {
-			return getKeyDistance(closest[i].Id, target).
-				Cmp(getKeyDistance(closest[j].Id, target)) < 0
+			return GetKeyDistance(closest[i].Id, target).
+				Cmp(GetKeyDistance(closest[j].Id, target)) < 0
 		})
 		if len(closest) > K {
 			closest = closest[:K]

@@ -1,4 +1,4 @@
-package main
+package dht
 
 import (
 	"errors"
@@ -22,7 +22,7 @@ type NetworkNode struct {
 
 func NewNetworkNode(address string, port int) *NetworkNode {
 	return &NetworkNode{
-		Id:      generateKey(),
+		Id:      GenerateKey(),
 		Address: net.ParseIP(address),
 		Port:    port,
 	}

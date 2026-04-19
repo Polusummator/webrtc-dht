@@ -4,21 +4,22 @@ import (
 	"context"
 	"fmt"
 	"time"
+
+	"github.com/Polusummator/webrtc-dht/dht"
+	udptransport "github.com/Polusummator/webrtc-dht/transport/udp"
 )
 
 func main() {
-	netNode1 := NewNetworkNode("127.0.0.1", 8000)
-	transport1 := NewUDPTransport(netNode1)
-	node1 := NewNode(netNode1, transport1)
+	net1 := dht.NewNetworkNode("127.0.0.1", 8000)
+	node1 := dht.NewNode(net1, udptransport.NewTransport(net1))
 	if err := node1.Start(); err != nil {
 		fmt.Println("Node1 start error:", err)
 		return
 	}
 	defer node1.Close()
 
-	netNode2 := NewNetworkNode("127.0.0.1", 8001)
-	transport2 := NewUDPTransport(netNode2)
-	node2 := NewNode(netNode2, transport2)
+	net2 := dht.NewNetworkNode("127.0.0.1", 8001)
+	node2 := dht.NewNode(net2, udptransport.NewTransport(net2))
 	if err := node2.Start(); err != nil {
 		fmt.Println("Node2 start error:", err)
 		return
@@ -29,12 +30,12 @@ func main() {
 
 	ctx := context.Background()
 
-	if err := node2.Bootstrap(ctx, []*NetworkNode{netNode1}); err != nil {
+	if err := node2.Bootstrap(ctx, []*dht.NetworkNode{net1}); err != nil {
 		fmt.Println("Bootstrap error:", err)
 	}
 
-	testKey := KeyFromString("test_key")
-	testData := ValueMeta{Inline: true, Data: []byte("Hello world")}
+	testKey := dht.KeyFromString("test_key")
+	testData := dht.ValueMeta{Inline: true, Data: []byte("Hello world")}
 	if err := node1.StoreValue(ctx, testKey, testData); err != nil {
 		fmt.Println("StoreValue error:", err)
 	}

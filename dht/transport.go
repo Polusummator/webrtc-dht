@@ -1,4 +1,4 @@
-package main
+package dht
 
 const (
 	RPCPing      = "PING"

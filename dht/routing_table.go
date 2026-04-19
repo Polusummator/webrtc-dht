@@ -1,4 +1,4 @@
-package main
+package dht
 
 import (
 	"math/big"
@@ -19,7 +19,7 @@ func NewRoutingTable(id NodeId) *RoutingTable {
 }
 
 func (rt *RoutingTable) bucketIndex(target NodeId) int {
-	dist := getKeyDistance(rt.nodeId, target)
+	dist := GetKeyDistance(rt.nodeId, target)
 	if dist.BitLen() == 0 {
 		return 0
 	}
@@ -28,7 +28,7 @@ func (rt *RoutingTable) bucketIndex(target NodeId) int {
 
 func (rt *RoutingTable) Add(node *NetworkNode) {
 	if rt.nodeId == node.Id {
-		return // не добавляем самого себя
+		return
 	}
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
@@ -46,7 +46,7 @@ func (rt *RoutingTable) Add(node *NetworkNode) {
 	if len(bucket) < K {
 		rt.buckets[idx] = append(bucket, node)
 	}
-	// TODO: ping, eviction
+	// todo: ping, eviction
 }
 
 type nodeDistance struct {
@@ -61,7 +61,7 @@ func (rt *RoutingTable) FindClosest(target NodeId, count int) []*NetworkNode {
 	var all []nodeDistance
 	for _, bucket := range rt.buckets {
 		for _, n := range bucket {
-			all = append(all, nodeDistance{n, getKeyDistance(n.Id, target)})
+			all = append(all, nodeDistance{n, GetKeyDistance(n.Id, target)})
 		}
 	}
 	sort.Slice(all, func(i, j int) bool {

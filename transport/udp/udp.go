@@ -1,4 +1,4 @@
-package main
+package udp
 
 import (
 	"crypto/rand"
@@ -11,53 +11,56 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Polusummator/webrtc-dht/dht"
 	"github.com/pion/stun/v3"
 )
 
-const defaultRequestTimeout = 2 * time.Second
-const blobTCPTimeout = 30 * time.Second
+const (
+	defaultRequestTimeout = 2 * time.Second
+	blobTCPTimeout        = 30 * time.Second
+)
 
 type message struct {
-	Type     string         `json:"type"`
-	IsReq    bool           `json:"is_req"`
-	ReqID    string         `json:"req_id"`
-	Sender   *NetworkNode   `json:"sender,omitempty"`
-	TargetID NodeId         `json:"target_id,omitempty"`
-	Key      DHTKey         `json:"key,omitempty"`
-	Data     *ValueMeta     `json:"data,omitempty"`
-	Value    *ValueMeta     `json:"value,omitempty"`
-	Nodes    []*NetworkNode `json:"nodes,omitempty"`
-	Error    string         `json:"error,omitempty"`
+	Type     string             `json:"type"`
+	IsReq    bool               `json:"is_req"`
+	ReqID    string             `json:"req_id"`
+	Sender   *dht.NetworkNode   `json:"sender,omitempty"`
+	TargetID dht.NodeId         `json:"target_id,omitempty"`
+	Key      dht.DHTKey         `json:"key,omitempty"`
+	Data     *dht.ValueMeta     `json:"data,omitempty"`
+	Value    *dht.ValueMeta     `json:"value,omitempty"`
+	Nodes    []*dht.NetworkNode `json:"nodes,omitempty"`
+	Error    string             `json:"error,omitempty"`
 }
 
 type pendingReq struct {
 	ch chan *message
 }
 
-type UDPTransport struct {
-	localNode *NetworkNode
+type Transport struct {
+	localNode *dht.NetworkNode
 	conn      *net.UDPConn
-	tcpLn     net.Listener // for blob fetching
-	handler   RPCHandler
+	tcpLn     net.Listener
+	handler   dht.RPCHandler
 
 	requestTimeout  time.Duration
 	pendingRequests sync.Map // map[string]*pendingReq
 	stunServer      string
 }
 
-func NewUDPTransport(local *NetworkNode) *UDPTransport {
-	return &UDPTransport{
+func NewTransport(local *dht.NetworkNode) *Transport {
+	return &Transport{
 		localNode:      local,
 		requestTimeout: defaultRequestTimeout,
-		stunServer:     "stun.l.google.com:19302", // todo
+		stunServer:     "stun.l.google.com:19302",
 	}
 }
 
-func (t *UDPTransport) SetStunServer(server string) {
+func (t *Transport) SetStunServer(server string) {
 	t.stunServer = server
 }
 
-func (t *UDPTransport) Listen(handler RPCHandler) error {
+func (t *Transport) Listen(handler dht.RPCHandler) error {
 	if handler == nil {
 		return errors.New("rpc handler is nil")
 	}
@@ -92,7 +95,7 @@ func (t *UDPTransport) Listen(handler RPCHandler) error {
 	return nil
 }
 
-func (t *UDPTransport) listenUDP() {
+func (t *Transport) listenUDP() {
 	buf := make([]byte, 65535)
 	for {
 		n, remoteAddr, err := t.conn.ReadFromUDP(buf)
@@ -112,7 +115,7 @@ func (t *UDPTransport) listenUDP() {
 	}
 }
 
-func (t *UDPTransport) listenBlobTCP() {
+func (t *Transport) listenBlobTCP() {
 	for {
 		conn, err := t.tcpLn.Accept()
 		if err != nil {
@@ -125,7 +128,7 @@ func (t *UDPTransport) listenBlobTCP() {
 	}
 }
 
-func (t *UDPTransport) handleBlobConn(conn net.Conn) {
+func (t *Transport) handleBlobConn(conn net.Conn) {
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(blobTCPTimeout))
 
@@ -152,7 +155,7 @@ func (t *UDPTransport) handleBlobConn(conn net.Conn) {
 	}
 }
 
-func (t *UDPTransport) resolvePublicAddress() error {
+func (t *Transport) resolvePublicAddress() error {
 	serverAddr, err := net.ResolveUDPAddr("udp", t.stunServer)
 	if err != nil {
 		return err
@@ -192,7 +195,7 @@ func (t *UDPTransport) resolvePublicAddress() error {
 	return nil
 }
 
-func (t *UDPTransport) handleMessage(msg *message, remoteAddr *net.UDPAddr) {
+func (t *Transport) handleMessage(msg *message, remoteAddr *net.UDPAddr) {
 	if !msg.IsReq {
 		if reqItf, ok := t.pendingRequests.Load(msg.ReqID); ok {
 			req := reqItf.(*pendingReq)
@@ -219,11 +222,11 @@ func (t *UDPTransport) handleMessage(msg *message, remoteAddr *net.UDPAddr) {
 	}
 
 	switch msg.Type {
-	case RPCPing:
+	case dht.RPCPing:
 		if err := t.handler.OnPing(msg.Sender); err != nil {
 			resp.Error = err.Error()
 		}
-	case RPCStore:
+	case dht.RPCStore:
 		if msg.Data == nil {
 			resp.Error = "data is missing"
 			break
@@ -231,16 +234,16 @@ func (t *UDPTransport) handleMessage(msg *message, remoteAddr *net.UDPAddr) {
 		if err := t.handler.OnStore(msg.Sender, msg.Key, *msg.Data); err != nil {
 			resp.Error = err.Error()
 		}
-	case RPCFindNode:
+	case dht.RPCFindNode:
 		nodes, err := t.handler.OnFindNode(msg.Sender, msg.TargetID)
 		if err != nil {
 			resp.Error = err.Error()
 			break
 		}
 		resp.Nodes = nodes
-	case RPCFindValue:
+	case dht.RPCFindValue:
 		value, nodes, err := t.handler.OnFindValue(msg.Sender, msg.Key)
-		if err != nil && !errors.Is(err, ErrNotFound) {
+		if err != nil && !errors.Is(err, dht.ErrNotFound) {
 			resp.Error = err.Error()
 			break
 		}
@@ -260,7 +263,7 @@ func generateReqID() string {
 	return fmt.Sprintf("%x", b)
 }
 
-func (t *UDPTransport) sendReq(target *NetworkNode, msg *message) (*message, error) {
+func (t *Transport) sendReq(target *dht.NetworkNode, msg *message) (*message, error) {
 	if t.conn == nil {
 		return nil, errors.New("transport is not listening")
 	}
@@ -282,51 +285,46 @@ func (t *UDPTransport) sendReq(target *NetworkNode, msg *message) (*message, err
 	t.pendingRequests.Store(msg.ReqID, req)
 	defer t.pendingRequests.Delete(msg.ReqID)
 
-	_, err = t.conn.WriteToUDP(b, addr)
-	if err != nil {
+	if _, err = t.conn.WriteToUDP(b, addr); err != nil {
 		return nil, err
 	}
 
 	select {
 	case resp := <-req.ch:
 		if resp.Error != "" {
-			if resp.Error == ErrNotFound.Error() {
-				return nil, ErrNotFound
+			if resp.Error == dht.ErrNotFound.Error() {
+				return nil, dht.ErrNotFound
 			}
 			return nil, errors.New(resp.Error)
 		}
 		return resp, nil
 	case <-time.After(t.requestTimeout):
-		return nil, fmt.Errorf("timeout")
+		return nil, fmt.Errorf("request to %s timed out", addr)
 	}
 }
 
-func (t *UDPTransport) Ping(target *NetworkNode) error {
-	msg := message{Type: RPCPing}
-	_, err := t.sendReq(target, &msg)
+func (t *Transport) Ping(target *dht.NetworkNode) error {
+	_, err := t.sendReq(target, &message{Type: dht.RPCPing})
 	return err
 }
 
-func (t *UDPTransport) Store(target *NetworkNode, key DHTKey, data ValueMeta) error {
-	msg := message{Type: RPCStore, Key: key, Data: &data}
-	_, err := t.sendReq(target, &msg)
+func (t *Transport) Store(target *dht.NetworkNode, key dht.DHTKey, data dht.ValueMeta) error {
+	_, err := t.sendReq(target, &message{Type: dht.RPCStore, Key: key, Data: &data})
 	return err
 }
 
-func (t *UDPTransport) FindNode(target *NetworkNode, targetId NodeId) ([]*NetworkNode, error) {
-	msg := message{Type: RPCFindNode, TargetID: targetId}
-	resp, err := t.sendReq(target, &msg)
+func (t *Transport) FindNode(target *dht.NetworkNode, targetId dht.NodeId) ([]*dht.NetworkNode, error) {
+	resp, err := t.sendReq(target, &message{Type: dht.RPCFindNode, TargetID: targetId})
 	if err != nil {
 		return nil, err
 	}
 	return resp.Nodes, nil
 }
 
-func (t *UDPTransport) FindValue(target *NetworkNode, key DHTKey) (*ValueMeta, []*NetworkNode, error) {
-	msg := message{Type: RPCFindValue, Key: key}
-	resp, err := t.sendReq(target, &msg)
+func (t *Transport) FindValue(target *dht.NetworkNode, key dht.DHTKey) (*dht.ValueMeta, []*dht.NetworkNode, error) {
+	resp, err := t.sendReq(target, &message{Type: dht.RPCFindValue, Key: key})
 	if err != nil {
-		if errors.Is(err, ErrNotFound) {
+		if errors.Is(err, dht.ErrNotFound) {
 			return nil, nil, nil
 		}
 		return nil, nil, err
@@ -334,9 +332,9 @@ func (t *UDPTransport) FindValue(target *NetworkNode, key DHTKey) (*ValueMeta, [
 	return resp.Value, resp.Nodes, nil
 }
 
-func (t *UDPTransport) FetchBlob(target *NetworkNode, ref string) ([]byte, error) {
+func (t *Transport) FetchBlob(target *dht.NetworkNode, ref string) ([]byte, error) {
 	if len(ref) != 64 {
-		return nil, fmt.Errorf("invalid blob ref length: %d", len(ref))
+		return nil, fmt.Errorf("invalid blob ref length: %d (want 64)", len(ref))
 	}
 
 	addr := fmt.Sprintf("%s:%d", target.Address, target.Port)
@@ -357,7 +355,7 @@ func (t *UDPTransport) FetchBlob(target *NetworkNode, ref string) ([]byte, error
 	}
 	size := binary.BigEndian.Uint64(sizeBuf)
 	if size == 0 {
-		return nil, ErrNotFound
+		return nil, dht.ErrNotFound
 	}
 
 	data := make([]byte, size)
@@ -367,7 +365,7 @@ func (t *UDPTransport) FetchBlob(target *NetworkNode, ref string) ([]byte, error
 	return data, nil
 }
 
-func (t *UDPTransport) Close() error {
+func (t *Transport) Close() error {
 	if t.tcpLn != nil {
 		_ = t.tcpLn.Close()
 	}

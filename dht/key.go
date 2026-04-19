@@ -1,4 +1,4 @@
-package main
+package dht
 
 import (
 	"crypto/rand"
@@ -32,13 +32,13 @@ func (k *DHTKey) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-func getKeyDistance(a, b DHTKey) *big.Int {
+func GetKeyDistance(a, b DHTKey) *big.Int {
 	x := new(big.Int).SetBytes(a[:])
 	y := new(big.Int).SetBytes(b[:])
 	return new(big.Int).Xor(x, y)
 }
 
-func generateKey() DHTKey {
+func GenerateKey() DHTKey {
 	var k DHTKey
 	_, _ = rand.Read(k[:])
 	return k
