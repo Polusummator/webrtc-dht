@@ -100,6 +100,17 @@ func (t *Transport) newPC() (*pion.PeerConnection, error) {
 
 func (t *Transport) Listen(handler dht.RPCHandler) error {
 	t.handler = handler
+	dhtNode, hasDHTNode := handler.(interface{ DHTNode() *dht.Node })
+	switch sig := t.signaler.(type) {
+	case *DHTSignaler:
+		if hasDHTNode {
+			sig.Attach(dhtNode.DHTNode())
+		}
+	case *HybridSignaler:
+		if hasDHTNode {
+			sig.DHTSig().Attach(dhtNode.DHTNode())
+		}
+	}
 	return t.signaler.ListenOffers(t.local, t.handleIncomingOffer)
 }
 

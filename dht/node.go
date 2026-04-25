@@ -17,7 +17,7 @@ type NetworkNode struct {
 	Id      NodeId            `json:"id"`
 	Address net.IP            `json:"address"`
 	Port    int               `json:"port"`
-	Meta    map[string]string `json:"meta,omitempty"` // todo: sdp?
+	Meta    map[string]string `json:"meta,omitempty"`
 }
 
 func NewNetworkNode(address string, port int) *NetworkNode {
@@ -111,4 +111,8 @@ func (node *Node) blobStore() (BlobStore, bool) {
 
 func (node *Node) nodeAddr() string {
 	return fmt.Sprintf("%s:%d", node.self.Address, node.self.Port)
+}
+
+func (node *Node) DHTNode() *Node {
+	return node
 }
