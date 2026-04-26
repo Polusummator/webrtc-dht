@@ -49,8 +49,19 @@ type wsSignalMsg struct {
 	SDP      string `json:"sdp,omitempty"`
 }
 
+func centralWsURL(u string) string {
+	if len(u) >= 7 && u[:7] == "http://" {
+		return "ws://" + u[7:]
+	}
+	if len(u) >= 8 && u[:8] == "https://" {
+		return "wss://" + u[8:]
+	}
+	return u
+}
+
 func (s *CentralSignaler) ListenOffers(local *dht.NetworkNode, handler func(SignalPayload) (string, error)) error {
-	conn, _, err := websocket.DefaultDialer.Dial(s.serverURL, nil)
+	wsURL := centralWsURL(s.serverURL) + "/signal"
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
 	if err != nil {
 		return fmt.Errorf("CentralSignaler: dial %s: %w", s.serverURL, err)
 	}
