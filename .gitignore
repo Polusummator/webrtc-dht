@@ -1,0 +1,11 @@
+dist/
+results/transport/
+results/signaling/
+results/plots/
+results/tables/
+infra/.terraform/
+infra/terraform.tfstate
+infra/terraform.tfstate.backup
+infra/*.tfvars
+*.tfstate*
+
