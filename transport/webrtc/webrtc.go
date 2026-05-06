@@ -15,10 +15,13 @@ import (
 )
 
 const (
-	labelControl = "dht-control"
-	labelBlob    = "dht-blob"
-	rpcTimeout   = 5 * time.Second
-	blobTimeout  = 60 * time.Second
+	labelControl        = "dht-control"
+	labelBlob           = "dht-blob"
+	rpcTimeout          = 5 * time.Second
+	blobTimeout         = 120 * time.Second
+	blobChunkSize       = 256 * 1024
+	blobBufferThreshold = uint64(8 * 1024 * 1024)
+	sctpReceiveBufSize  = 8 * 1024 * 1024
 )
 
 type rpcMessage struct {
@@ -40,7 +43,9 @@ type pendingRPC struct {
 }
 
 type pendingBlob struct {
-	ch chan []byte
+	mu  sync.Mutex
+	buf []byte
+	ch  chan []byte
 }
 
 type peerConn struct {
@@ -48,8 +53,9 @@ type peerConn struct {
 	controlDC *pion.DataChannel
 	blobDC    *pion.DataChannel
 
-	controlReady chan struct{}
-	blobReady    chan struct{}
+	controlReady  chan struct{}
+	blobReady     chan struct{}
+	blobLowSignal chan struct{}
 
 	mu          sync.Mutex
 	rpcPending  map[string]*pendingRPC
@@ -58,12 +64,36 @@ type peerConn struct {
 
 func newPeerConn(pc *pion.PeerConnection) *peerConn {
 	return &peerConn{
-		pc:           pc,
-		controlReady: make(chan struct{}),
-		blobReady:    make(chan struct{}),
-		rpcPending:   make(map[string]*pendingRPC),
-		blobPending:  make(map[string]*pendingBlob),
+		pc:            pc,
+		controlReady:  make(chan struct{}),
+		blobReady:     make(chan struct{}),
+		blobLowSignal: make(chan struct{}, 1),
+		rpcPending:    make(map[string]*pendingRPC),
+		blobPending:   make(map[string]*pendingBlob),
 	}
+}
+
+func sendBlobChunked(dc *pion.DataChannel, lowSignal <-chan struct{}, reqID string, data []byte) error {
+	for offset := 0; offset < len(data); {
+		for dc.BufferedAmount() > blobBufferThreshold {
+			<-lowSignal
+		}
+		end := offset + blobChunkSize
+		isLast := byte(0)
+		if end >= len(data) {
+			end = len(data)
+			isLast = 1
+		}
+		frame := make([]byte, 33+end-offset)
+		copy(frame[:32], reqID)
+		frame[32] = isLast
+		copy(frame[33:], data[offset:end])
+		if err := dc.Send(frame); err != nil {
+			return err
+		}
+		offset = end
+	}
+	return nil
 }
 
 type Transport struct {
@@ -89,6 +119,7 @@ func NewTransport(local *dht.NetworkNode, signaler Signaler, stunURLs ...string)
 func (t *Transport) newPC() (*pion.PeerConnection, error) {
 	se := pion.SettingEngine{}
 	se.SetICETimeouts(2*time.Second, 2*time.Second, 500*time.Millisecond)
+	se.SetSCTPMaxReceiveBufferSize(sctpReceiveBufSize)
 
 	var servers []pion.ICEServer
 	for _, u := range t.stunURLs {
@@ -131,7 +162,16 @@ func (t *Transport) handleIncomingOffer(payload SignalPayload) (string, error) {
 			})
 		case labelBlob:
 			peer.blobDC = dc
-			dc.OnOpen(func() { close(peer.blobReady) })
+			dc.OnOpen(func() {
+				dc.SetBufferedAmountLowThreshold(blobBufferThreshold)
+				dc.OnBufferedAmountLow(func() {
+					select {
+					case peer.blobLowSignal <- struct{}{}:
+					default:
+					}
+				})
+				close(peer.blobReady)
+			})
 			dc.OnMessage(func(m pion.DataChannelMessage) {
 				onBlobMsg(peer, m.Data)
 			})
@@ -189,7 +229,16 @@ func (t *Transport) connect(target *dht.NetworkNode) (*peerConn, error) {
 	controlDC.OnMessage(func(m pion.DataChannelMessage) {
 		t.onControlMsg(peer, m.Data, target.Id)
 	})
-	blobDC.OnOpen(func() { close(peer.blobReady) })
+	blobDC.OnOpen(func() {
+		blobDC.SetBufferedAmountLowThreshold(blobBufferThreshold)
+		blobDC.OnBufferedAmountLow(func() {
+			select {
+			case peer.blobLowSignal <- struct{}{}:
+			default:
+			}
+		})
+		close(peer.blobReady)
+	})
 	blobDC.OnMessage(func(m pion.DataChannelMessage) {
 		onBlobMsg(peer, m.Data)
 	})
@@ -321,22 +370,25 @@ func (t *Transport) onControlMsg(peer *peerConn, raw []byte, senderID dht.NodeId
 		t.sendControl(peer, resp)
 
 	case dht.RPCFetchBlob:
-		data, err := t.handler.OnFetchBlob(msg.Sender, msg.Ref)
-		if err != nil {
-			resp.Error = err.Error()
-			t.sendControl(peer, resp)
-			return
-		}
-		frame := make([]byte, 32+len(data))
-		copy(frame[:32], msg.ReqID)
-		copy(frame[32:], data)
-		select {
-		case <-peer.blobReady:
-			_ = peer.blobDC.Send(frame)
-		default:
-			resp.Error = "blob channel not ready"
-			t.sendControl(peer, resp)
-		}
+		go func() {
+			data, err := t.handler.OnFetchBlob(msg.Sender, msg.Ref)
+			if err != nil {
+				resp.Error = err.Error()
+				t.sendControl(peer, resp)
+				return
+			}
+			select {
+			case <-peer.blobReady:
+			default:
+				resp.Error = "blob channel not ready"
+				t.sendControl(peer, resp)
+				return
+			}
+			if err := sendBlobChunked(peer.blobDC, peer.blobLowSignal, msg.ReqID, data); err != nil {
+				resp.Error = err.Error()
+				t.sendControl(peer, resp)
+			}
+		}()
 
 	default:
 		resp.Error = fmt.Sprintf("unknown rpc: %s", msg.Type)
@@ -346,23 +398,36 @@ func (t *Transport) onControlMsg(peer *peerConn, raw []byte, senderID dht.NodeId
 
 func (t *Transport) sendControl(peer *peerConn, msg rpcMessage) {
 	b, _ := json.Marshal(msg)
-	_ = peer.controlDC.SendText(string(b))
+	_ = peer.controlDC.Send(b)
 }
 
 func onBlobMsg(peer *peerConn, data []byte) {
-	if len(data) < 32 {
+	if len(data) < 33 {
 		return
 	}
 	reqID := string(data[:32])
-	payload := make([]byte, len(data)-32)
-	copy(payload, data[32:])
+	isLast := data[32]
+	chunk := data[33:]
 
 	peer.mu.Lock()
 	bp, ok := peer.blobPending[reqID]
 	peer.mu.Unlock()
-	if ok {
+	if !ok {
+		return
+	}
+
+	bp.mu.Lock()
+	bp.buf = append(bp.buf, chunk...)
+	var full []byte
+	if isLast == 1 {
+		full = bp.buf
+		bp.buf = nil
+	}
+	bp.mu.Unlock()
+
+	if full != nil {
 		select {
-		case bp.ch <- payload:
+		case bp.ch <- full:
 		default:
 		}
 	}
@@ -389,7 +454,7 @@ func (t *Transport) sendRPC(target *dht.NetworkNode, msg rpcMessage) (*rpcMessag
 	}()
 
 	b, _ := json.Marshal(msg)
-	if err := peer.controlDC.SendText(string(b)); err != nil {
+	if err := peer.controlDC.Send(b); err != nil {
 		return nil, err
 	}
 
@@ -472,7 +537,7 @@ func (t *Transport) FetchBlob(target *dht.NetworkNode, ref string) ([]byte, erro
 	}()
 
 	b, _ := json.Marshal(msg)
-	if err := peer.controlDC.SendText(string(b)); err != nil {
+	if err := peer.controlDC.Send(b); err != nil {
 		return nil, err
 	}
 
