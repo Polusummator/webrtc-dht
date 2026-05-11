@@ -1,12 +1,18 @@
 package udp
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"net"
 	"sync"
 	"time"
@@ -16,7 +22,8 @@ import (
 )
 
 const (
-	defaultRequestTimeout = 2 * time.Second
+	defaultRequestTimeout = 200 * time.Millisecond
+	maxRetries            = 3
 	blobTCPTimeout        = 30 * time.Second
 )
 
@@ -44,20 +51,49 @@ type Transport struct {
 	handler   dht.RPCHandler
 
 	requestTimeout  time.Duration
-	pendingRequests sync.Map // map[string]*pendingReq
+	pendingRequests sync.Map
 	stunServer      string
+	tlsConfig       *tls.Config
 }
 
 func NewTransport(local *dht.NetworkNode) *Transport {
 	return &Transport{
 		localNode:      local,
 		requestTimeout: defaultRequestTimeout,
-		stunServer:     "stun.l.google.com:19302",
+		stunServer:     "",
 	}
 }
 
 func (t *Transport) SetStunServer(server string) {
 	t.stunServer = server
+}
+
+func (t *Transport) SetTLS(cert tls.Certificate) {
+	t.tlsConfig = &tls.Config{
+		Certificates:       []tls.Certificate{cert},
+		InsecureSkipVerify: true,
+	}
+}
+
+func GenerateSelfSignedCert() (tls.Certificate, error) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "webrtc-dht-blob"},
+		NotBefore:    time.Now().Add(-time.Minute),
+		NotAfter:     time.Now().Add(24 * time.Hour),
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+	return tls.Certificate{
+		Certificate: [][]byte{der},
+		PrivateKey:  key,
+	}, nil
 }
 
 func (t *Transport) Listen(handler dht.RPCHandler) error {
@@ -82,7 +118,11 @@ func (t *Transport) Listen(handler dht.RPCHandler) error {
 		_ = conn.Close()
 		return fmt.Errorf("blob tcp listener: %w", err)
 	}
-	t.tcpLn = tcpLn
+	if t.tlsConfig != nil {
+		t.tcpLn = tls.NewListener(tcpLn, t.tlsConfig)
+	} else {
+		t.tcpLn = tcpLn
+	}
 
 	if t.stunServer != "" {
 		if err := t.resolvePublicAddress(); err != nil {
@@ -285,22 +325,24 @@ func (t *Transport) sendReq(target *dht.NetworkNode, msg *message) (*message, er
 	t.pendingRequests.Store(msg.ReqID, req)
 	defer t.pendingRequests.Delete(msg.ReqID)
 
-	if _, err = t.conn.WriteToUDP(b, addr); err != nil {
-		return nil, err
-	}
-
-	select {
-	case resp := <-req.ch:
-		if resp.Error != "" {
-			if resp.Error == dht.ErrNotFound.Error() {
-				return nil, dht.ErrNotFound
-			}
-			return nil, errors.New(resp.Error)
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		if _, err = t.conn.WriteToUDP(b, addr); err != nil {
+			return nil, err
 		}
-		return resp, nil
-	case <-time.After(t.requestTimeout):
-		return nil, fmt.Errorf("request to %s timed out", addr)
+
+		select {
+		case resp := <-req.ch:
+			if resp.Error != "" {
+				if resp.Error == dht.ErrNotFound.Error() {
+					return nil, dht.ErrNotFound
+				}
+				return nil, errors.New(resp.Error)
+			}
+			return resp, nil
+		case <-time.After(t.requestTimeout):
+		}
 	}
+	return nil, fmt.Errorf("request to %s timed out after %d attempts", addr, maxRetries)
 }
 
 func (t *Transport) Ping(target *dht.NetworkNode) error {
@@ -338,7 +380,13 @@ func (t *Transport) FetchBlob(target *dht.NetworkNode, ref string) ([]byte, erro
 	}
 
 	addr := fmt.Sprintf("%s:%d", target.Address, target.Port)
-	conn, err := net.DialTimeout("tcp", addr, blobTCPTimeout)
+	var conn net.Conn
+	var err error
+	if t.tlsConfig != nil {
+		conn, err = tls.DialWithDialer(&net.Dialer{Timeout: blobTCPTimeout}, "tcp", addr, t.tlsConfig)
+	} else {
+		conn, err = net.DialTimeout("tcp", addr, blobTCPTimeout)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("blob tcp dial %s: %w", addr, err)
 	}
