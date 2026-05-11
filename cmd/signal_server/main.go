@@ -6,9 +6,15 @@ import (
 	"log"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/gorilla/websocket"
 )
+
+const processDelay = 1 * time.Millisecond
+const forwardWorkers = 20
+
+var forwardSem chan struct{}
 
 type signalMsg struct {
 	Type     string `json:"type"`
@@ -18,16 +24,21 @@ type signalMsg struct {
 	SDP      string `json:"sdp,omitempty"`
 }
 
+type connEntry struct {
+	conn    *websocket.Conn
+	writeMu sync.Mutex
+}
+
 type server struct {
 	upgrader websocket.Upgrader
 	mu       sync.RWMutex
-	peers    map[string]*websocket.Conn
+	peers    map[string]*connEntry
 }
 
 func newServer() *server {
 	return &server{
 		upgrader: websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }},
-		peers:    make(map[string]*websocket.Conn),
+		peers:    make(map[string]*connEntry),
 	}
 }
 
@@ -59,15 +70,15 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		case "register":
 			nodeID = msg.ID
 			s.mu.Lock()
-			s.peers[nodeID] = conn
+			s.peers[nodeID] = &connEntry{conn: conn}
 			s.mu.Unlock()
 			log.Printf("registered: %s", nodeID)
 
 		case "offer":
-			s.forward(msg.CalleeID, msg)
+			go s.doForward(msg.CalleeID, msg)
 
 		case "answer":
-			s.forward(msg.CallerID, msg)
+			go s.doForward(msg.CallerID, msg)
 
 		default:
 			log.Printf("unknown message type: %s", msg.Type)
@@ -75,16 +86,22 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *server) forward(targetID string, msg signalMsg) {
+func (s *server) doForward(targetID string, msg signalMsg) {
+	forwardSem <- struct{}{}
+	time.Sleep(processDelay)
+	<-forwardSem
 	s.mu.RLock()
-	conn, ok := s.peers[targetID]
+	entry, ok := s.peers[targetID]
 	s.mu.RUnlock()
 	if !ok {
 		log.Printf("forward: peer %s not connected", targetID)
 		return
 	}
 	b, _ := json.Marshal(msg)
-	if err := conn.WriteMessage(websocket.TextMessage, b); err != nil {
+	entry.writeMu.Lock()
+	err := entry.conn.WriteMessage(websocket.TextMessage, b)
+	entry.writeMu.Unlock()
+	if err != nil {
 		log.Printf("forward to %s: %v", targetID, err)
 	}
 }
@@ -93,6 +110,7 @@ func main() {
 	addr := flag.String("addr", ":9000", "listen address")
 	flag.Parse()
 
+	forwardSem = make(chan struct{}, forwardWorkers)
 	s := newServer()
 	http.Handle("/signal", s)
 
