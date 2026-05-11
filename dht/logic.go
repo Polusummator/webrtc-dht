@@ -31,9 +31,15 @@ func (node *Node) StoreValue(ctx context.Context, key DHTKey, data ValueMeta) er
 	if err != nil && len(nodes) == 0 {
 		return err
 	}
+	var wg sync.WaitGroup
 	for _, n := range nodes {
-		_ = node.transport.Store(n, key, data)
+		wg.Add(1)
+		go func(target *NetworkNode) {
+			defer wg.Done()
+			_ = node.transport.Store(target, key, data)
+		}(n)
 	}
+	wg.Wait()
 	return nil
 }
 

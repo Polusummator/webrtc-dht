@@ -29,6 +29,7 @@ type CentralSignaler struct {
 	serverURL string
 
 	mu      sync.Mutex
+	writeMu sync.Mutex
 	conn    *websocket.Conn
 	pending map[string]chan string
 	cancel  context.CancelFunc
@@ -112,12 +113,14 @@ func (s *CentralSignaler) readLoop(ctx context.Context, conn *websocket.Conn, lo
 				if c == nil {
 					return
 				}
+				s.writeMu.Lock()
 				_ = c.WriteJSON(wsSignalMsg{
 					Type:     "answer",
 					CallerID: m.CallerID,
 					CalleeID: fmt.Sprintf("%x", local.Id),
 					SDP:      answer,
 				})
+				s.writeMu.Unlock()
 			}(msg)
 
 		case "answer":
@@ -155,12 +158,15 @@ func (s *CentralSignaler) SendOffer(ctx context.Context, target *dht.NetworkNode
 	if conn == nil {
 		return "", fmt.Errorf("CentralSignaler: not connected")
 	}
-	if err := conn.WriteJSON(wsSignalMsg{
+	s.writeMu.Lock()
+	err := conn.WriteJSON(wsSignalMsg{
 		Type:     "offer",
 		CallerID: callerHex,
 		CalleeID: calleeHex,
 		SDP:      payload.SDP,
-	}); err != nil {
+	})
+	s.writeMu.Unlock()
+	if err != nil {
 		return "", fmt.Errorf("CentralSignaler: send offer: %w", err)
 	}
 
@@ -336,9 +342,12 @@ func (s *DHTSignaler) getNode() *dht.Node {
 }
 
 func (s *DHTSignaler) pollOffers(ctx context.Context, local *dht.NetworkNode, handler func(SignalPayload) (string, error)) {
-	ticker := time.NewTicker(300 * time.Millisecond)
+	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
 	bellKey := dhtDoorbellKey(local.Id)
+
+	var procMu sync.Mutex
+	processing := make(map[dht.NodeId]bool)
 
 	for {
 		select {
@@ -356,27 +365,51 @@ func (s *DHTSignaler) pollOffers(ctx context.Context, local *dht.NetworkNode, ha
 			var callerID dht.NodeId
 			copy(callerID[:], meta.Data)
 
+			procMu.Lock()
+			if processing[callerID] {
+				procMu.Unlock()
+				continue
+			}
+			processing[callerID] = true
+			procMu.Unlock()
+
 			offerMeta, err := node.FindValue(ctx, dhtOfferKey(callerID, local.Id))
 			if err != nil || offerMeta == nil || !offerMeta.Inline {
+				procMu.Lock()
+				delete(processing, callerID)
+				procMu.Unlock()
 				continue
 			}
 			var entry dhtOfferEntry
 			if err := json.Unmarshal(offerMeta.Data, &entry); err != nil {
+				procMu.Lock()
+				delete(processing, callerID)
+				procMu.Unlock()
 				continue
 			}
 			if time.Since(time.Unix(entry.Timestamp, 0)) > 30*time.Second {
+				procMu.Lock()
+				delete(processing, callerID)
+				procMu.Unlock()
 				continue
 			}
 
-			answer, err := handler(entry.Payload)
-			if err != nil {
-				continue
-			}
-			_ = node.StoreValue(ctx, dhtAnswerKey(callerID, local.Id), dht.ValueMeta{
-				Inline: true,
-				Data:   []byte(answer),
-			})
-			_ = node.StoreValue(ctx, bellKey, dht.ValueMeta{Inline: true, Data: nil})
+			go func(callerID dht.NodeId, entry dhtOfferEntry) {
+				defer func() {
+					procMu.Lock()
+					delete(processing, callerID)
+					procMu.Unlock()
+				}()
+				answer, err := handler(entry.Payload)
+				if err != nil {
+					return
+				}
+				_ = node.StoreValue(ctx, dhtAnswerKey(callerID, local.Id), dht.ValueMeta{
+					Inline: true,
+					Data:   []byte(answer),
+				})
+				_ = node.StoreValue(ctx, bellKey, dht.ValueMeta{Inline: true, Data: nil})
+			}(callerID, entry)
 		}
 	}
 }
@@ -404,19 +437,17 @@ func (s *DHTSignaler) SendOffer(ctx context.Context, target *dht.NetworkNode, pa
 	}
 
 	answerKey := dhtAnswerKey(payload.CallerID, target.Id)
-	deadline := time.Now().Add(15 * time.Second)
-	for time.Now().Before(deadline) {
+	for {
 		select {
 		case <-ctx.Done():
-			return "", ctx.Err()
-		case <-time.After(300 * time.Millisecond):
+			return "", fmt.Errorf("signaling: %w", ctx.Err())
+		case <-time.After(10 * time.Millisecond):
 		}
 		meta, err := node.FindValue(ctx, answerKey)
 		if err == nil && meta != nil && meta.Inline && len(meta.Data) > 0 {
 			return string(meta.Data), nil
 		}
 	}
-	return "", fmt.Errorf("signaling timeout: no answer from %x", target.Id)
 }
 
 func (s *DHTSignaler) Close() error {

@@ -111,7 +111,7 @@ func NewTransport(local *dht.NetworkNode, signaler Signaler, stunURLs ...string)
 	return &Transport{
 		local:    local,
 		signaler: signaler,
-		stunURLs: stunURLs, // empty = host-only ICE
+		stunURLs: stunURLs,
 		peers:    make(map[dht.NodeId]*peerConn),
 	}
 }
@@ -134,11 +134,11 @@ func (t *Transport) Listen(handler dht.RPCHandler) error {
 	dhtNode, hasDHTNode := handler.(interface{ DHTNode() *dht.Node })
 	switch sig := t.signaler.(type) {
 	case *DHTSignaler:
-		if hasDHTNode {
+		if hasDHTNode && sig.getNode() == nil {
 			sig.Attach(dhtNode.DHTNode())
 		}
 	case *HybridSignaler:
-		if hasDHTNode {
+		if hasDHTNode && sig.DHTSig().getNode() == nil {
 			sig.DHTSig().Attach(dhtNode.DHTNode())
 		}
 	}
@@ -259,7 +259,7 @@ func (t *Transport) connect(target *dht.NetworkNode) (*peerConn, error) {
 	t.peers[target.Id] = peer
 	t.peersMu.Unlock()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	answerSDP, err := t.signaler.SendOffer(ctx, target, SignalPayload{
@@ -379,7 +379,7 @@ func (t *Transport) onControlMsg(peer *peerConn, raw []byte, senderID dht.NodeId
 			}
 			select {
 			case <-peer.blobReady:
-			default:
+			case <-time.After(15 * time.Second):
 				resp.Error = "blob channel not ready"
 				t.sendControl(peer, resp)
 				return
