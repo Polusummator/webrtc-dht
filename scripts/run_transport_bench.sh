@@ -4,74 +4,85 @@ cd "$(dirname "$0")/.."
 
 SSH_USER="${SSH_USER:-ubuntu}"
 SSH_KEY="${SSH_KEY:-$HOME/.ssh/ssh-key-1770215555284}"
-ITERATIONS="${ITERATIONS:-1000}"
+ITERATIONS="${ITERATIONS:-100}"
+RESULTS_DIR="${RESULTS_DIR:-results/transport}"
 INFRA_DIR="infra"
+SIG_PORT=8300
 
-mkdir -p results/transport
+mkdir -p "$RESULTS_DIR"
 
 SIGNAL_IP=$(cd $INFRA_DIR && tofu output -raw signal_server_public_ip)
-NODE_INTERNAL_JSON=$(cd $INFRA_DIR && tofu output -json node_internal_ips)
-NODE_IPS=($(echo $NODE_INTERNAL_JSON | python3 -c "import json,sys; print('\n'.join(json.load(sys.stdin)))"))
+NODE_IPS_JSON=$(cd $INFRA_DIR && tofu output -json node_internal_ips)
+NODE_IPS=($(echo $NODE_IPS_JSON | python3 -c "import json,sys; print('\n'.join(json.load(sys.stdin)))"))
 SERVER=${NODE_IPS[1]}
 CLIENT=${NODE_IPS[2]}
 
-SSH_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=30 -i "$SSH_KEY")
-JUMP_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=30 -i "$SSH_KEY" -o "ProxyJump=$SSH_USER@$SIGNAL_IP")
+SSH_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+          -o LogLevel=ERROR -o ConnectTimeout=30 -o BatchMode=yes \
+          -i "$SSH_KEY")
+JUMP_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+           -o LogLevel=ERROR -o ConnectTimeout=30 -o BatchMode=yes \
+           -i "$SSH_KEY" -o "ProxyJump=$SSH_USER@$SIGNAL_IP")
 
 echo "server=$SERVER  client=$CLIENT  (via jump $SIGNAL_IP)"
+echo "iterations=$ITERATIONS  results=$RESULTS_DIR"
 
-BLOB_DIR="/tmp/bench_blobs"
+echo "=== deploying bench_transport ==="
+scp "${JUMP_OPTS[@]}" dist/bench_transport $SSH_USER@$SERVER:~/bench_transport
+scp "${JUMP_OPTS[@]}" dist/bench_transport $SSH_USER@$CLIENT:~/bench_transport
+ssh "${JUMP_OPTS[@]}" $SSH_USER@$SERVER "chmod +x ~/bench_transport"
+ssh "${JUMP_OPTS[@]}" $SSH_USER@$CLIENT "chmod +x ~/bench_transport"
 
-run_bench() {
-  local transport=$1
-  local mode=$2
-  local payload=$3
-  local tag="${transport}_${mode}_${payload}"
+ssh "${JUMP_OPTS[@]}" $SSH_USER@$SERVER "pkill -f bench_transport || true" 2>/dev/null || true
+ssh "${JUMP_OPTS[@]}" $SSH_USER@$CLIENT "pkill -f bench_transport || true" 2>/dev/null || true
+sleep 1
 
-  echo "=== $tag ==="
+echo "=== starting server on $SERVER ==="
+ssh "${JUMP_OPTS[@]}" $SSH_USER@$SERVER \
+  "nohup ~/bench_transport -role=server -sig=0.0.0.0:${SIG_PORT} \
+   > /tmp/bench_transport_server.log 2>&1 &"
 
-  ssh "${JUMP_OPTS[@]}" $SSH_USER@$SERVER "pkill -f bench_transport || true" 2>/dev/null || true
+sleep 2
 
-  SERVER_PORT=7000
-  SIG_PORT=8100
+echo "=== running client on $CLIENT (iters=$ITERATIONS) ==="
+OUT_REMOTE="/tmp/result_transport.json"
 
-  if [[ $transport == "webrtc" ]]; then
-    ssh "${JUMP_OPTS[@]}" $SSH_USER@$SERVER \
-      "nohup ~/bench_transport -role=server -transport=webrtc -addr=0.0.0.0 -port=$SERVER_PORT -sig-port=$SIG_PORT -mode=$mode -payload=$payload -blob-dir=$BLOB_DIR > /tmp/bench_server.log 2>&1 &"
-  else
-    ssh "${JUMP_OPTS[@]}" $SSH_USER@$SERVER \
-      "nohup ~/bench_transport -role=server -transport=udp -addr=0.0.0.0 -port=$SERVER_PORT -mode=$mode -payload=$payload -blob-dir=$BLOB_DIR > /tmp/bench_server.log 2>&1 &"
-  fi
+ssh "${JUMP_OPTS[@]}" $SSH_USER@$CLIENT \
+  "~/bench_transport \
+     -role=client \
+     -sig=http://${SERVER}:${SIG_PORT} \
+     -iters=${ITERATIONS} \
+     -out=${OUT_REMOTE}"
 
-  sleep 2
+echo "=== collecting results ==="
+scp "${JUMP_OPTS[@]}" $SSH_USER@$CLIENT:${OUT_REMOTE} \
+    "${RESULTS_DIR}/result_transport_webrtc.json"
 
-  SERVER_INTERNAL=$(cd $INFRA_DIR && tofu output -json node_internal_ips | python3 -c "import json,sys; print(json.load(sys.stdin)[0])")
+echo ""
+echo "=== quick summary ==="
+python3 -c "
+import json, numpy as np, sys
 
-  if [[ $transport == "webrtc" ]]; then
-    ssh "${JUMP_OPTS[@]}" $SSH_USER@$CLIENT \
-      "~/bench_transport -role=client -transport=webrtc -addr=0.0.0.0 -port=7001 -remote-addr=$SERVER_INTERNAL -remote-port=$SERVER_PORT -sig-port=8101 -remote-sig-port=$SIG_PORT -mode=$mode -payload=$payload -iterations=$ITERATIONS -out=/tmp/result_${tag}.json"
-  else
-    ssh "${JUMP_OPTS[@]}" $SSH_USER@$CLIENT \
-      "~/bench_transport -role=client -transport=udp -addr=0.0.0.0 -port=7001 -remote-addr=$SERVER_INTERNAL -remote-port=$SERVER_PORT -mode=$mode -payload=$payload -iterations=$ITERATIONS -out=/tmp/result_${tag}.json"
-  fi
+path = '${RESULTS_DIR}/result_transport_webrtc.json'
+with open(path) as f:
+    data = json.load(f)
 
-  scp "${JUMP_OPTS[@]}" $SSH_USER@$CLIENT:/tmp/result_${tag}.json results/transport/
+from collections import defaultdict
+by_size = defaultdict(list)
+for r in data:
+    by_size[r['size_bytes']].append(r)
 
-  ssh "${JUMP_OPTS[@]}" $SSH_USER@$SERVER "pkill -f bench_transport || true" 2>/dev/null || true
-  sleep 1
-}
+for sz in sorted(by_size.keys()):
+    rows = by_size[sz]
+    mbps = [(r['transferred_bytes'] / (r['duration_ns']/1e9)) / 1e6 for r in rows]
+    label = f'{sz//1024}KB' if sz < 1048576 else f'{sz//1048576}MB'
+    print(f'  {label:6s}  n={len(mbps):3d}  '
+          f'median={np.median(mbps):6.1f} MB/s  '
+          f'p5={np.percentile(mbps,5):5.1f}  '
+          f'p95={np.percentile(mbps,95):5.1f}')
+"
 
-for transport in udp webrtc; do
-  run_bench $transport ping 0
-  for payload in 64 256 1024; do
-    run_bench $transport store $payload
-    run_bench $transport findvalue $payload
-  done
-  for payload in 65536 524288 1048576 4194304; do
-    run_bench $transport blob $payload
-  done
-done
+ssh "${JUMP_OPTS[@]}" $SSH_USER@$SERVER "pkill -f bench_transport || true" 2>/dev/null || true
 
-echo "transport benchmark done. results in results/transport/"
-ls results/transport/
-
+echo ""
+echo "done. results: ${RESULTS_DIR}/result_transport_webrtc.json"

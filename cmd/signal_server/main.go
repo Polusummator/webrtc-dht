@@ -6,12 +6,10 @@ import (
 	"log"
 	"net/http"
 	"sync"
-	"time"
 
 	"github.com/gorilla/websocket"
 )
 
-const processDelay = 1 * time.Millisecond
 const forwardWorkers = 20
 
 var forwardSem chan struct{}
@@ -88,7 +86,6 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) doForward(targetID string, msg signalMsg) {
 	forwardSem <- struct{}{}
-	time.Sleep(processDelay)
 	<-forwardSem
 	s.mu.RLock()
 	entry, ok := s.peers[targetID]

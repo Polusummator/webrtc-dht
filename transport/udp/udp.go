@@ -22,8 +22,8 @@ import (
 )
 
 const (
-	defaultRequestTimeout = 200 * time.Millisecond
-	maxRetries            = 3
+	defaultRequestTimeout = 5 * time.Second
+	maxRetries            = 1
 	blobTCPTimeout        = 30 * time.Second
 )
 
@@ -110,6 +110,8 @@ func (t *Transport) Listen(handler dht.RPCHandler) error {
 	if err != nil {
 		return err
 	}
+	_ = conn.SetReadBuffer(4 * 1024 * 1024)
+	_ = conn.SetWriteBuffer(4 * 1024 * 1024)
 	t.conn = conn
 
 	tcpAddr := &net.TCPAddr{IP: t.localNode.Address, Port: t.localNode.Port}

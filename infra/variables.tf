@@ -58,7 +58,7 @@ variable "bootstrap_cores" {
 
 variable "bootstrap_memory" {
   type    = number
-  default = 2
+  default = 4
 }
 
 variable "node_cores" {
@@ -68,7 +68,7 @@ variable "node_cores" {
 
 variable "node_memory" {
   type    = number
-  default = 2
+  default = 4
 }
 
 variable "signal_server_cores" {
@@ -78,6 +78,6 @@ variable "signal_server_cores" {
 
 variable "signal_server_memory" {
   type    = number
-  default = 2
+  default = 4
 }
 

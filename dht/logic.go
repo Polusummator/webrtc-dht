@@ -9,6 +9,7 @@ import (
 )
 
 const Alpha = 3
+const StoreK = 3
 
 func (node *Node) Bootstrap(ctx context.Context, bootstrapNodes []*NetworkNode) error {
 	if len(bootstrapNodes) == 0 {
@@ -30,6 +31,9 @@ func (node *Node) StoreValue(ctx context.Context, key DHTKey, data ValueMeta) er
 	nodes, err := node.LookupNode(ctx, key)
 	if err != nil && len(nodes) == 0 {
 		return err
+	}
+	if len(nodes) > StoreK {
+		nodes = nodes[:StoreK]
 	}
 	var wg sync.WaitGroup
 	for _, n := range nodes {
@@ -108,6 +112,17 @@ func (node *Node) iterativeSearch(
 		return nil, nil, errors.New("routing table is empty")
 	}
 
+	filtered := closest[:0]
+	for _, n := range closest {
+		if n.Id != node.self.Id {
+			filtered = append(filtered, n)
+		}
+	}
+	closest = filtered
+	if len(closest) == 0 {
+		return nil, nil, errors.New("routing table is empty")
+	}
+
 	visited := make(map[NodeId]bool)
 
 	for {
@@ -162,6 +177,9 @@ func (node *Node) iterativeSearch(
 					return
 				}
 				for _, r := range res {
+					if r.Id == node.self.Id {
+						continue
+					}
 					node.rt.Add(r)
 					if !visited[r.Id] {
 						newNodes = append(newNodes, r)

@@ -1,13 +1,25 @@
 package main
 
 import (
+	"encoding/json"
+	"flag"
 	"fmt"
+	"os"
 	"sort"
 	"sync"
 	"time"
 
 	pion "github.com/pion/webrtc/v4"
 )
+
+type jsonResult struct {
+	BlobSize int     `json:"blob_size"`
+	Iters    int     `json:"iters"`
+	MinMs    float64 `json:"min_ms"`
+	MedMs    float64 `json:"med_ms"`
+	P95Ms    float64 `json:"p95_ms"`
+	MBps     float64 `json:"mbps"`
+}
 
 const (
 	chunkSize  = 256 * 1024
@@ -24,8 +36,13 @@ var blobSizes = []int{
 }
 
 func main() {
+	outFile := flag.String("out", "", "write JSON results to this file")
+	flag.Parse()
+
 	fmt.Printf("%-10s  %8s  %8s  %8s  %8s  %10s\n", "blob-size", "iters", "min-ms", "med-ms", "p95-ms", "MB/s")
 	fmt.Println("----------  --------  --------  --------  --------  ----------")
+
+	var jsonResults []jsonResult
 
 	for _, sz := range blobSizes {
 		label := fmt.Sprintf("%dKB", sz>>10)
@@ -55,6 +72,28 @@ func main() {
 			float64(med.Milliseconds()),
 			float64(p95.Milliseconds()),
 			mbps)
+
+		jsonResults = append(jsonResults, jsonResult{
+			BlobSize: sz,
+			Iters:    len(durs),
+			MinMs:    float64(minD.Milliseconds()),
+			MedMs:    float64(med.Milliseconds()),
+			P95Ms:    float64(p95.Milliseconds()),
+			MBps:     mbps,
+		})
+	}
+
+	if *outFile != "" {
+		f, err := os.Create(*outFile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "create output file: %v\n", err)
+			return
+		}
+		defer f.Close()
+		enc := json.NewEncoder(f)
+		enc.SetIndent("", "  ")
+		_ = enc.Encode(jsonResults)
+		fmt.Printf("wrote results to %s\n", *outFile)
 	}
 }
 

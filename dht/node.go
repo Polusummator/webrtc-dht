@@ -116,3 +116,7 @@ func (node *Node) nodeAddr() string {
 func (node *Node) DHTNode() *Node {
 	return node
 }
+
+func (node *Node) DeleteLocal(key DHTKey) {
+	node.storage.Delete(key)
+}

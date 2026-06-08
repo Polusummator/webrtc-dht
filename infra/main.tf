@@ -88,7 +88,7 @@ resource "yandex_vpc_security_group" "bench" {
 
 resource "yandex_compute_instance" "signal_server" {
   name        = "signal-server"
-  platform_id = "standard-v1"
+  platform_id = "standard-v3"
   zone        = var.zone
 
   resources {
@@ -117,7 +117,7 @@ resource "yandex_compute_instance" "signal_server" {
 
 resource "yandex_compute_instance" "bootstrap" {
   name        = "dht-bootstrap"
-  platform_id = "standard-v1"
+  platform_id = "standard-v3"
   zone        = var.zone
 
   resources {
@@ -147,7 +147,7 @@ resource "yandex_compute_instance" "bootstrap" {
 resource "yandex_compute_instance" "node" {
   count       = var.node_count
   name        = "dht-node-${count.index}"
-  platform_id = "standard-v1"
+  platform_id = "standard-v3"
   zone        = var.zone
 
   resources {
